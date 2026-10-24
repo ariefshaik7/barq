@@ -1,0 +1,42 @@
+# Compiled binaries and local execution artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+*.coverprofile
+profile.cov
+
+# Go workspace and local module overrides
+go.work
+go.work.sum
+
+# Dependency directory 
+# (Uncomment the line below if you prefer NOT to commit your vendor folder)
+# vendor/
+
+# Sensitive data and local configuration
+.env
+.env.*
+*.local
+secrets/
+
+# IDEs and Code Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
