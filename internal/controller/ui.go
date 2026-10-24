@@ -394,11 +394,6 @@ html[data-theme="light"] .logs { background: #0d1117; color: #c9d5e6; }
 "use strict";
 /* ==================================================================== *
  * Barq CI - embedded single page application
- *
- * No framework, no build step, no external asset. The application is
- * organised as a small set of pure functions that render into the DOM.
- * State changes trigger a re-render of the affected region only, so a
- * poll never rebuilds the whole tree.
  * ==================================================================== */
 
 var S = {
@@ -406,7 +401,13 @@ var S = {
   authRequired: false,
   signupEnabled: false,
   oidcEnabled: false,
-  tab: "runs",
+  theme: localStorage.getItem("barq.theme") || "dark",
+  org: null,
+  project: null,
+  repo: null,
+  orgs: [],
+  projects: [],
+  repos: [],
   runs: [],
   run: null,
   selectedStep: null,
@@ -416,11 +417,11 @@ var S = {
   secrets: [],
   alerts: [],
   plugins: [],
-  theme: localStorage.getItem("barq.theme") || "dark",
-  csrftoken: readCookie("barq_csrf"),
   logStream: null,
   poll: null,
-  dirty: false
+  dirty: false,
+  csrftoken: readCookie("barq_csrf"),
+  dropdownOpen: false
 };
 
 /* ---------------------------------------------------------------- *
@@ -535,25 +536,33 @@ function api(path, options) {
 }
 
 /* ---------------------------------------------------------------- *
- * Shell
+ * Horse logo SVG
  * ---------------------------------------------------------------- */
 function logo(size) {
-  var svg = svgEl("svg", { width: size || 24, height: size || 24, viewBox: "0 0 24 24", fill: "none" });
-  var p = svgEl("path", { d: "M4 6h7v5H4zM13 6h7v5h-7zM4 13h7v5H4zM13 13h7v5h-7z", fill: "currentColor", opacity: ".85" });
-  svg.appendChild(p);
+  var svg = svgEl("svg", { width: size || 24, height: size || 24, viewBox: "0 0 24 24", fill: "none", xmlns: "http://www.w3.org/2000/svg" });
+  var path = svgEl("path", {
+    d: "M12 2L3 7l6 6L4 17l5 5 6-6L21 7l-9-5z",
+    stroke: "currentColor",
+    "stroke-width": "2",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    fill: "none"
+  });
+  svg.appendChild(path);
   return svg;
 }
 
+/* ---------------------------------------------------------------- *
+ * Shell
+ * ---------------------------------------------------------------- */
 function render() {
   var root = document.getElementById("root");
-  var scrollTop = root.scrollTop;
   root.innerHTML = "";
   if (!S.user && S.authRequired) {
     root.appendChild(renderAuth());
   } else {
     root.appendChild(renderShell());
   }
-  root.scrollTop = scrollTop;
 }
 
 function renderShell() {
@@ -571,18 +580,36 @@ function renderShell() {
 
 function renderHeader() {
   var header = el("header", { class: "top" });
+
+  // Brand + Org selector
   var brand = el("div", { class: "brand" });
   brand.appendChild(logo(22));
-  brand.appendChild(el("span", { text: "Barq" }));
+  brand.appendChild(el("span", { style: "font-size:18px;font-weight:700;letter-spacing:-.02em", text: "Barq" }));
   brand.appendChild(el("span", { class: "v", text: "CI" }));
   header.appendChild(brand);
 
+  // Org / Project / Repo breadcrumb
+  var breadcrumb = el("div", { class: "breadcrumb" });
+  if (S.org) {
+    breadcrumb.appendChild(el("a", { text: S.org.name, href: "#", onclick: function(e){ e.preventDefault(); S.project=null; S.repo=null; S.run=null; render(); } }));
+    breadcrumb.appendChild(el("span", { class: "sep", text: "/" }));
+  }
+  if (S.project) {
+    breadcrumb.appendChild(el("a", { text: S.project.name, href: "#", onclick: function(e){ e.preventDefault(); S.repo=null; S.run=null; render(); } }));
+    breadcrumb.appendChild(el("span", { class: "sep", text: "/" }));
+  }
+  if (S.repo) {
+    breadcrumb.appendChild(el("span", { class: "current", text: S.repo.name }));
+  }
+  if (S.org || S.project || S.repo) {
+    header.appendChild(breadcrumb);
+  }
+
+  // Main nav tabs
   var tabs = el("nav", { class: "tabs" });
   var defs = [
     ["runs", "Runs", S.runs.length],
     ["graph", "Graph", 0],
-    ["stats", "Analytics", 0],
-    ["system", "System", 0],
     ["settings", "Settings", 0]
   ];
   defs.forEach(function (def) {
@@ -594,8 +621,10 @@ function renderHeader() {
     tabs.appendChild(button);
   });
   header.appendChild(tabs);
+
   header.appendChild(el("div", { class: "spacer" }));
 
+  // Health
   var health = el("span", { class: "chip" });
   if (S.health) {
     var state = S.health.state || "unknown";
@@ -608,10 +637,36 @@ function renderHeader() {
   }
   header.appendChild(health);
 
+  // User profile dropdown
   if (S.user) {
-    header.appendChild(el("span", { class: "chip", text: S.user.email + " · " + S.user.role }));
+    var userWrap = el("div", { style: "position:relative; display:flex; align-items:center; gap:10px;" });
+    userWrap.appendChild(el("span", { class: "chip", text: S.user.email + " · " + S.user.role }));
+    var dropdownBtn = el("button", {
+      class: "icon-btn",
+      type: "button",
+      onclick: function() { S.dropdownOpen = !S.dropdownOpen; render(); }
+    });
+    dropdownBtn.appendChild(el("i", { style: "font-size:16px; font-weight:bold", text: "▼" }));
+    userWrap.appendChild(dropdownBtn);
+    header.appendChild(userWrap);
+
+    if (S.dropdownOpen) {
+      var dd = el("div", { class: "dropdown" });
+      dd.appendChild(el("a", { href: "#", text: "Profile", onclick: function(){ S.dropdownOpen=false; S.tab="settings"; render(); } }));
+      dd.appendChild(el("div", { class: "div" }));
+      dd.appendChild(el("a", { href: "#", text: "Settings", onclick: function(){ S.dropdownOpen=false; S.tab="settings"; render(); } }));
+      dd.appendChild(el("div", { class: "div" }));
+      dd.appendChild(el("button", { class: "btn sm ghost", type: "button", text: "Sign out", style: "width:100%; justify-content:flex-start; color: var(--danger);", onclick: function() {
+        S.dropdownOpen=false;
+        api("/api/v1/auth/logout", { method: "POST" }).then(function () {
+          S.user = null; clearCookie("barq_csrf"); render();
+        });
+      } }));
+      header.appendChild(dd);
+    }
   }
 
+  // Theme toggle
   var themeBtn = el("button", {
     class: "icon-btn", type: "button", title: "Toggle theme",
     onclick: function () {
@@ -623,52 +678,99 @@ function renderHeader() {
   themeBtn.appendChild(logo(16));
   header.appendChild(themeBtn);
 
-  if (S.user) {
-    header.appendChild(el("button", {
-      class: "btn sm", type: "button", text: "Sign out",
-      onclick: function () {
-        api("/api/v1/auth/logout", { method: "POST" }).then(function () {
-          S.user = null; clearCookie("barq_csrf"); render();
-        });
-      }
-    }));
-  }
   return header;
 }
 
 function renderSidebar() {
   var aside = el("aside", { class: "sidebar" });
+
+  // Org selector
   var sec = el("div", { class: "sec" });
-  sec.appendChild(el("h3", { text: "Recent runs" }));
+  sec.appendChild(el("h3", { text: "Organization" }));
+  var orgSelect = el("select", { class: "input", style: "width:100%;padding:6px 8px;font-size:12px" });
+  orgSelect.appendChild(el("option", { value: "", text: "Select organization" }));
+  S.orgs.forEach(function (o) {
+    orgSelect.appendChild(el("option", { value: o.id, text: o.name, selected: S.org && S.org.id === o.id }));
+  });
+  orgSelect.addEventListener("change", function () {
+    var id = orgSelect.value;
+    if (!id) { S.org = null; S.project = null; S.repo = null; S.run = null; render(); return; }
+    var found = S.orgs.find(function (o) { return o.id === id; });
+    if (found) { S.org = found; S.project = null; S.repo = null; S.run = null; loadProjects(); render(); }
+  });
+  sec.appendChild(orgSelect);
   aside.appendChild(sec);
 
-  var scroll = el("div", { class: "scroll" });
-  if (!S.runs.length) {
-    scroll.appendChild(el("div", { class: "empty", text: "No runs yet" }));
-  }
-  S.runs.slice(0, 60).forEach(function (run) {
-    var item = el("div", {
-      class: "run-item" + (run.id === (S.run && S.run.id) ? " sel" : ""),
-      onclick: function () { selectRun(run.id); }
+  // Project selector
+  if (S.org) {
+    var pSec = el("div", { class: "sec" });
+    pSec.appendChild(el("h3", { text: "Project" }));
+    var projSelect = el("select", { class: "input", style: "width:100%;padding:6px 8px;font-size:12px" });
+    projSelect.appendChild(el("option", { value: "", text: "Select project" }));
+    S.projects.forEach(function (p) {
+      projSelect.appendChild(el("option", { value: p.id, text: p.name, selected: S.project && S.project.id === p.id }));
     });
-    var r1 = el("div", { class: "r1" });
-    r1.appendChild(el("span", { class: "pill " + run.status, text: run.status }));
-    r1.appendChild(el("span", { class: "nm", text: run.name }));
-    item.appendChild(r1);
-    var r2 = el("div", { class: "r2" });
-    r2.appendChild(el("span", { text: run.id.slice(0, 8) }));
-    r2.appendChild(el("span", { text: fmtWhen(run.created_at) }));
-    item.appendChild(r2);
-    scroll.appendChild(item);
-  });
-  aside.appendChild(scroll);
+    projSelect.addEventListener("change", function () {
+      var id = projSelect.value;
+      if (!id) { S.project = null; S.repo = null; S.run = null; render(); return; }
+      var found = S.projects.find(function (p) { return p.id === id; });
+      if (found) { S.project = found; S.repo = null; S.run = null; loadRepos(); render(); }
+    });
+    pSec.appendChild(projSelect);
+    aside.appendChild(pSec);
+  }
+
+  // Repo selector
+  if (S.project) {
+    var rSec = el("div", { class: "sec" });
+    rSec.appendChild(el("h3", { text: "Repository" }));
+    var repoSelect = el("select", { class: "input", style: "width:100%;padding:6px 8px;font-size:12px" });
+    repoSelect.appendChild(el("option", { value: "", text: "Select repository" }));
+    S.repos.forEach(function (r) {
+      repoSelect.appendChild(el("option", { value: r.id, text: r.name, selected: S.repo && S.repo.id === r.id }));
+    });
+    repoSelect.addEventListener("change", function () {
+      var id = repoSelect.value;
+      if (!id) { S.repo = null; S.run = null; render(); return; }
+      var found = S.repos.find(function (r) { return r.id === id; });
+      if (found) { S.repo = found; S.run = null; loadRuns(); render(); }
+    });
+    rSec.appendChild(repoSelect);
+    aside.appendChild(rSec);
+  }
+
+  // Recent runs for selected repo
+  if (S.repo) {
+    var runSec = el("div", { class: "sec" });
+    runSec.appendChild(el("h3", { text: "Recent runs" }));
+    var scroll = el("div", { class: "scroll" });
+    if (!S.runs.length) {
+      scroll.appendChild(el("div", { class: "empty", text: "No runs yet" }));
+    }
+    S.runs.slice(0, 30).forEach(function (run) {
+      var item = el("div", {
+        class: "run-item" + (run.id === (S.run && S.run.id) ? " sel" : ""),
+        onclick: function () { selectRun(run.id); }
+      });
+      var pill = el("span", { class: "pill " + run.status, text: run.status });
+      var info = el("div", { class: "info" });
+      info.appendChild(el("span", { class: "nm", text: run.name }));
+      info.appendChild(el("span", { class: "r2", text: run.id.slice(0, 8) + "  ·  " + fmtWhen(run.created_at) }));
+      item.appendChild(pill);
+      item.appendChild(info);
+      scroll.appendChild(item);
+    });
+    runSec.appendChild(scroll);
+    aside.appendChild(runSec);
+  }
+
   return aside;
 }
 
 function renderContentHead() {
   var head = el("div", { class: "content-head" });
   if (S.tab === "runs" || S.tab === "graph") {
-    head.appendChild(el("h2", { style: "font-size:15px;font-weight:620;margin:0", text: S.run ? S.run.name : "Runs" }));
+    head.appendChild(el("h2", { style: "font-size:15px;font-weight:700;margin:0", text: S.run ? S.run.name : "Runs" }));
     if (S.run) {
       head.appendChild(el("span", { class: "pill " + S.run.status, text: S.run.status }));
       head.appendChild(el("span", { class: "faint mono", text: S.run.id }));
@@ -678,14 +780,8 @@ function renderContentHead() {
       class: "btn primary", type: "button", text: "Spawn pipeline",
       onclick: openSpawn
     }));
-  } else if (S.tab === "stats") {
-    head.appendChild(el("h2", { style: "font-size:15px;font-weight:620;margin:0", text: "Analytics" }));
-    head.appendChild(el("div", { class: "spacer" }));
-    head.appendChild(el("span", { class: "faint", text: "Computed from the persisted run history" }));
-  } else if (S.tab === "system") {
-    head.appendChild(el("h2", { style: "font-size:15px;font-weight:620;margin:0", text: "System health" }));
   } else {
-    head.appendChild(el("h2", { style: "font-size:15px;font-weight:620;margin:0", text: "Settings" }));
+    head.appendChild(el("h2", { style: "font-size:15px;font-weight:700;margin:0", text: "Settings" }));
   }
   return head;
 }
@@ -694,8 +790,6 @@ function renderContentBody() {
   var body = el("div", { class: "content-body" });
   if (S.tab === "runs") { body.appendChild(renderRunsTab()); }
   else if (S.tab === "graph") { body.appendChild(renderGraphTab()); }
-  else if (S.tab === "stats") { body.appendChild(renderStatsTab()); }
-  else if (S.tab === "system") { body.appendChild(renderSystemTab()); }
   else { body.appendChild(renderSettingsTab()); }
   return body;
 }
@@ -705,6 +799,7 @@ function renderContentBody() {
  * ---------------------------------------------------------------- */
 function renderRunsTab() {
   var wrap = el("div", { class: "grid" });
+
   if (!S.run) {
     var card = el("div", { class: "card" });
     card.appendChild(el("h3", { text: "Runs" }));
@@ -759,8 +854,6 @@ function renderRunsTab() {
   tBody.appendChild(renderStatRow("Cached steps", cached + " of " + Object.keys(run.steps || {}).length));
   tBody.appendChild(renderStatRow("Started", run.started_at ? new Date(run.started_at).toLocaleString() : "-"));
   tBody.appendChild(renderStatRow("Finished", run.finished_at ? new Date(run.finished_at).toLocaleString() : "-"));
-  tBody.appendChild(renderStatRow("Source", run.source || "-"));
-  tBody.appendChild(renderStatRow("Storage tier", run.storage_tier || "HOT"));
   timing.appendChild(tBody);
   columns.appendChild(timing);
 
@@ -842,11 +935,11 @@ function renderStepTable(run) {
 }
 
 /* ---------------------------------------------------------------- *
- * Graph tab
+ * Graph tab — real-time DAG with per-step logs
  * ---------------------------------------------------------------- */
 var STATUS_COLOR = {
   SUCCESS: "var(--success)", FAILED: "var(--danger)", RUNNING: "var(--accent)",
-  QUEUED: "var(--text-faint)", CACHED: "var(--violet)", CANCELED: "var(--text-faint)",
+  QUEUED: "var(--text-dim)", CACHED: "var(--violet)", CANCELED: "var(--text-faint)",
   SPOT_MIGRATING: "var(--pink)"
 };
 
@@ -860,30 +953,41 @@ function renderGraphTab() {
   var card = el("div", { class: "card" });
   card.appendChild(el("h3", {}, [
     document.createTextNode("Execution graph"),
-    el("span", { class: "faint", text: "waves run concurrently, columns are waves" })
+    el("span", { class: "faint", text: "waves run concurrently · click a node for its logs" })
   ]));
   var body = el("div", { class: "body" });
-  var graph = el("div", { class: "graph-wrap" });
-  graph.appendChild(buildGraph(run));
-  body.appendChild(graph);
 
-  var legend = el("div", { class: "legend mt" });
-  ["SUCCESS", "RUNNING", "CACHED", "FAILED", "QUEUED", "SPOT_MIGRATING"].forEach(function (status) {
-    var item = el("span");
-    var swatch = el("i");
-    swatch.style.background = STATUS_COLOR[status];
-    item.appendChild(swatch);
-    item.appendChild(document.createTextNode(status.replace("_", " ")));
-    legend.appendChild(item);
-  });
-  body.appendChild(legend);
+  // Split: graph left, logs right
+  var split = el("div", { style: "display:flex; flex-direction:column; gap:14px; height:100%" });
+
+  var graphCard = el("div", { class: "card", style: "flex:1; min-height:0" });
+  graphCard.appendChild(el("h3", { style: "margin:0 0 10px 0; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint)", text: "DAG" }));
+  var gBody = el("div", { class: "body", style: "padding:0; min-height:0" });
+  var graph = el("div", { class: "graph-wrap", style: "flex:1; min-height:0" });
+  graph.appendChild(buildGraph(run));
+  gBody.appendChild(graph);
+  graphCard.appendChild(gBody);
+  split.appendChild(graphCard);
+
+  var logCard = el("div", { class: "card", style: "flex:1; min-height:0" });
+  logCard.appendChild(el("h3", { style: "margin:0 0 10px 0; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint)", text: "Step Logs" }));
+  var lBody = el("div", { class: "body", style: "padding:0; min-height:0" });
+  lBody.appendChild(el("pre", { class: "logs", id: "graph-logbox", text: S.selectedStep ? "" : "Click a node in the graph to view its logs." }));
+  logCard.appendChild(lBody);
+  split.appendChild(logCard);
+
+  body.appendChild(split);
   card.appendChild(body);
   wrap.appendChild(card);
+
+  // Stream logs for selected step
+  if (S.selectedStep && S.run) {
+    openStepLogs(S.run.id, S.selectedStep);
+  }
+
   return wrap;
 }
 
-/* buildGraph renders the DAG as an SVG. It is a single pass over the
- * step list, so it stays fast even for a large pipeline. */
 function buildGraph(run) {
   var compiled = run.compiled || { steps: [], waves: [] };
   var byId = {};
@@ -974,6 +1078,7 @@ function buildGraph(run) {
     group.appendChild(badge);
     group.addEventListener("click", function () {
       S.selectedStep = S.selectedStep === id ? null : id;
+      if (S.selectedStep && S.run) { openStepLogs(S.run.id, S.selectedStep); }
       render();
     });
     svg.appendChild(group);
@@ -982,185 +1087,29 @@ function buildGraph(run) {
   return svg;
 }
 
+function openStepLogs(runId, stepId) {
+  var box = document.getElementById("graph-logbox");
+  if (!box) { return; }
+  box.textContent = "Fetching logs for " + stepId + "...\n";
+  api("/api/v1/runs/" + runId + "/logs?step=" + encodeURIComponent(stepId)).then(function (data) {
+    box.textContent = data || "No logs yet for " + stepId;
+    box.scrollTop = box.scrollHeight;
+  }).catch(function (e) {
+    box.textContent = "Error loading logs: " + e.message;
+  });
+}
+
 /* ---------------------------------------------------------------- *
- * Analytics tab
+ * Analytics tab (placeholder)
  * ---------------------------------------------------------------- */
 function renderStatsTab() {
   var wrap = el("div", { class: "grid" });
-  if (!S.stats) {
-    wrap.appendChild(el("div", { class: "card" }, [el("div", { class: "empty", text: "Loading analytics..." })]));
-    return wrap;
-  }
-  var s = S.stats;
-
-  var tiles = el("div", { class: "grid c4" });
-  tiles.appendChild(statCard("Success rate", fmtPct(s.success_rate),
-    s.success_runs + " passed / " + (s.success_runs + s.failed_runs) + " completed",
-    s.success_rate >= 95 ? "good" : s.success_rate >= 80 ? "warn" : "bad"));
-  tiles.appendChild(statCard("Runs", String(s.total_runs), s.active_runs + " active now", "accent"));
-  tiles.appendChild(statCard("Cache hit rate", fmtPct(s.cache_hit_rate),
-    s.cached_steps + " of " + s.total_steps + " steps", s.cache_hit_rate > 0 ? "good" : ""));
-  tiles.appendChild(statCard("Median-ish duration", fmtMs(s.average_duration_ms),
-    "p95 " + fmtMs(s.p95_duration_ms), ""));
-  wrap.appendChild(tiles);
-
-  var tiles2 = el("div", { class: "grid c4 mt" });
-  tiles2.appendChild(statCard("Compute consumed", fmtMs(s.total_compute_ms),
-    "sum of all step durations", ""));
-  tiles2.appendChild(statCard("Compute saved by cache", fmtMs(s.saved_compute_ms),
-    "steps served without a Pod", s.saved_compute_ms > 0 ? "good" : ""));
-  tiles2.appendChild(statCard("Preemptions", String(s.preempted_steps),
-    "workers rescheduled after a reclaim", s.preempted_steps > 0 ? "warn" : ""));
-  tiles2.appendChild(statCard("Failed steps", String(s.failed_steps),
-    s.failed_runs + " failed runs", s.failed_steps > 0 ? "bad" : ""));
-  wrap.appendChild(tiles2);
-
-  var columns = el("div", { class: "grid c2 mt" });
-
-  var daily = el("div", { class: "card" });
-  daily.appendChild(el("h3", { text: "Runs per day" }));
-  var dBody = el("div", { class: "body" });
-  if (s.daily && s.daily.length) {
-    var spark = el("div", { class: "spark" });
-    var max = Math.max.apply(null, s.daily.map(function (d) { return d.runs; })) || 1;
-    s.daily.forEach(function (point) {
-      var bar = el("i", { title: point.date + ": " + point.runs + " runs" });
-      bar.style.height = Math.max(3, (point.runs / max) * 100) + "%";
-      if (point.failed > 0) { bar.className = "bad"; }
-      else if (point.success > 0) { bar.className = "good"; }
-      spark.appendChild(bar);
-    });
-    dBody.appendChild(spark);
-    var table = el("table", { class: "tbl mt" });
-    var head = el("thead");
-    head.appendChild(el("tr", {}, [
-      el("th", { text: "Date" }), el("th", { text: "Runs" }),
-      el("th", { text: "Passed" }), el("th", { text: "Failed" }), el("th", { text: "Avg" })
-    ]));
-    table.appendChild(head);
-    var body = el("tbody");
-    s.daily.slice().reverse().forEach(function (point) {
-      body.appendChild(el("tr", {}, [
-        el("td", { class: "mono", text: point.date }),
-        el("td", { class: "mono", text: String(point.runs) }),
-        el("td", { class: "mono", text: String(point.success) }),
-        el("td", { class: "mono", text: String(point.failed) }),
-        el("td", { class: "mono", text: fmtMs(point.average_ms) })
-      ]));
-    });
-    table.appendChild(body);
-    dBody.appendChild(table);
-  } else {
-    dBody.appendChild(el("div", { class: "empty", text: "No runs in this window." }));
-  }
-  daily.appendChild(dBody);
-  columns.appendChild(daily);
-
-  var timing = el("div", { class: "card" });
-  timing.appendChild(el("h3", { text: "Slowest steps" }));
-  var tBody = el("div", { class: "body" });
-  if (s.top_steps && s.top_steps.length) {
-    var table = el("table", { class: "tbl" });
-    var head = el("thead");
-    head.appendChild(el("tr", {}, [
-      el("th", { text: "Step" }), el("th", { text: "Runs" }),
-      el("th", { text: "Average" }), el("th", { text: "Max" })
-    ]));
-    table.appendChild(head);
-    var body = el("tbody");
-    s.top_steps.forEach(function (item) {
-      body.appendChild(el("tr", {}, [
-        el("td", { text: item.step_id }),
-        el("td", { class: "mono", text: String(item.count) }),
-        el("td", { class: "mono", text: fmtMs(item.average_ms) }),
-        el("td", { class: "mono", text: fmtMs(item.max_ms) })
-      ]));
-    });
-    table.appendChild(body);
-    tBody.appendChild(table);
-  } else {
-    tBody.appendChild(el("div", { class: "empty", text: "No step timings yet." }));
-  }
-  if (s.failure_reasons && s.failure_reasons.length) {
-    tBody.appendChild(el("h3", { style: "margin-top:16px", text: "Failure hotspots" }));
-    var fTable = el("table", { class: "tbl" });
-    var fBody = el("tbody");
-    s.failure_reasons.forEach(function (item) {
-      fBody.appendChild(el("tr", {}, [
-        el("td", { text: item.step_id }),
-        el("td", { class: "mono", text: String(item.count) + " failures" })
-      ]));
-    });
-    fTable.appendChild(fBody);
-    tBody.appendChild(fTable);
-  }
-  timing.appendChild(tBody);
-  columns.appendChild(timing);
-  wrap.appendChild(columns);
-  return wrap;
-}
-
-function statCard(label, value, sub, kind) {
-  var card = el("div", { class: "card stat" });
-  card.appendChild(el("div", { class: "label", text: label }));
-  card.appendChild(el("div", { class: "value " + (kind || ""), text: value }));
-  card.appendChild(el("div", { class: "sub", text: sub || "" }));
-  return card;
-}
-
-/* ---------------------------------------------------------------- *
- * System tab
- * ---------------------------------------------------------------- */
-function renderSystemTab() {
-  var wrap = el("div", { class: "grid" });
-  if (!S.health) {
-    wrap.appendChild(el("div", { class: "card" }, [el("div", { class: "empty", text: "Loading health..." })]));
-    return wrap;
-  }
-  var h = S.health;
-  var tiles = el("div", { class: "grid c4" });
-  tiles.appendChild(statCard("Overall", h.state, "checked every 10s",
-    h.state === "healthy" ? "good" : h.state === "degraded" ? "warn" : "bad"));
-  tiles.appendChild(statCard("Uptime", fmtMs(h.uptime || 0), "since controller start", ""));
-  tiles.appendChild(statCard("Execution backend", h.backend || "-", h.simulator ? "synthetic results" : "real workers",
-    h.simulator ? "warn" : ""));
-  tiles.appendChild(statCard("Checks passing", h.healthy + "/" + (h.healthy + h.degraded + h.unhealthy),
-    h.degraded + " degraded, " + h.unhealthy + " failing",
-    h.unhealthy > 0 ? "bad" : h.degraded > 0 ? "warn" : "good"));
-  wrap.appendChild(tiles);
-
-  var card = el("div", { class: "card mt" });
-  card.appendChild(el("h3", { text: "Dependency checks" }));
-  var body = el("div", { class: "body" });
-  var table = el("table", { class: "tbl" });
-  var head = el("thead");
-  head.appendChild(el("tr", {}, [
-    el("th", { text: "Check" }), el("th", { text: "State" }),
-    el("th", { text: "Latency" }), el("th", { text: "Detail" })
-  ]));
-  table.appendChild(head);
-  var tbody = el("tbody");
-  (h.checks || []).forEach(function (check) {
-    var kind = check.state === "healthy" ? "ok" : check.state === "degraded" ? "warn" : "bad";
-    tbody.appendChild(el("tr", {}, [
-      el("td", {}, [
-        el("div", { text: check.name }),
-        el("div", { class: "faint", style: "font-size:11px", text: check.description || "" })
-      ]),
-      el("td", {}, [el("span", { class: "chip " + kind, text: check.state })]),
-      el("td", { class: "mono", text: fmtMs(check.latency_ms) }),
-      el("td", { class: "faint", style: "font-size:12px", text: check.message || "" })
-    ]));
-  });
-  table.appendChild(tbody);
-  body.appendChild(table);
-  card.appendChild(body);
-  wrap.appendChild(card);
+  wrap.appendChild(el("div", { class: "card" }, [el("div", { class: "empty", text: "Analytics coming soon." })]));
   return wrap;
 }
 
 /* ---------------------------------------------------------------- *
- * Settings tab
+ * Settings tab — RBAC, profile, secrets, credentials
  * ---------------------------------------------------------------- */
 function renderSettingsTab() {
   var wrap = el("div", { class: "grid c2" });
@@ -1176,7 +1125,7 @@ function renderSettingsTab() {
     pBody.appendChild(nameField);
     var emailField = el("label", { class: "field" });
     emailField.appendChild(el("span", { text: "Email" }));
-    emailField.appendChild(el("input", { class: "input", value: S.user.email, disabled: "disabled" }));
+    emailField.appendChild(el("input", { class: "input", value: S.user.email, disabled: true }));
     pBody.appendChild(emailField);
     pBody.appendChild(el("div", { class: "row" }, [
       el("span", { class: "chip", text: "Role: " + S.user.role }),
@@ -1222,6 +1171,7 @@ function renderSettingsTab() {
   }
 
   if (S.user && S.user.role === "admin") {
+    // Users (RBAC)
     var users = el("div", { class: "card" });
     users.appendChild(el("h3", {}, [document.createTextNode("Users"), el("span", { class: "faint", text: String(S.users.length) })]));
     var uBody = el("div", { class: "body" });
@@ -1263,6 +1213,7 @@ function renderSettingsTab() {
     users.appendChild(uBody);
     wrap.appendChild(users);
 
+    // Secrets
     var secrets = el("div", { class: "card" });
     secrets.appendChild(el("h3", {}, [document.createTextNode("Secrets"), el("span", { class: "faint", text: "values are never returned" })]));
     var sBody = el("div", { class: "body" });
@@ -1305,6 +1256,7 @@ function renderSettingsTab() {
     secrets.appendChild(sBody);
     wrap.appendChild(secrets);
 
+    // Alert destinations
     var alerts = el("div", { class: "card" });
     alerts.appendChild(el("h3", { text: "Alert destinations" }));
     var aBody = el("div", { class: "body" });
@@ -1347,26 +1299,27 @@ function renderSettingsTab() {
     aBody.appendChild(aTable);
     alerts.appendChild(aBody);
     wrap.appendChild(alerts);
-  }
 
-  var plugins = el("div", { class: "card" });
-  plugins.appendChild(el("h3", { text: "Plugin catalog" }));
-  var pBody = el("div", { class: "body" });
-  var pTable = el("table", { class: "tbl" });
-  var pHead = el("thead");
-  pHead.appendChild(el("tr", {}, [el("th", { text: "URI" }), el("th", { text: "Entrypoint" })]));
-  pTable.appendChild(pHead);
-  var pTbody = el("tbody");
-  S.plugins.forEach(function (plugin) {
-    pTbody.appendChild(el("tr", {}, [
-      el("td", { class: "mono", text: plugin.name }),
-      el("td", { class: "mono", text: plugin.entrypoint })
-    ]));
-  });
-  pTable.appendChild(pTbody);
-  pBody.appendChild(pTable);
-  plugins.appendChild(pBody);
-  wrap.appendChild(plugins);
+    // Plugin catalog
+    var plugins = el("div", { class: "card" });
+    plugins.appendChild(el("h3", { text: "Plugin catalog" }));
+    var pBody = el("div", { class: "body" });
+    var pTable = el("table", { class: "tbl" });
+    var pHead = el("thead");
+    pHead.appendChild(el("tr", {}, [el("th", { text: "URI" }), el("th", { text: "Entrypoint" })]));
+    pTable.appendChild(pHead);
+    var pTbody = el("tbody");
+    S.plugins.forEach(function (plugin) {
+      pTbody.appendChild(el("tr", {}, [
+        el("td", { class: "mono", text: plugin.name }),
+        el("td", { class: "mono", text: plugin.entrypoint })
+      ]));
+    });
+    pTable.appendChild(pTbody);
+    pBody.appendChild(pTable);
+    plugins.appendChild(pBody);
+    wrap.appendChild(plugins);
+  }
 
   return wrap;
 }
@@ -1378,8 +1331,8 @@ function renderAuth() {
   var shell = el("div", { class: "auth-shell" });
   var card = el("div", { class: "card auth-card" });
   var brand = el("div", { class: "brand" });
-  brand.appendChild(logo(28));
-  brand.appendChild(el("span", { style: "font-size:20px;font-weight:680", text: "Barq" }));
+  brand.appendChild(logo(32));
+  brand.appendChild(el("span", { style: "font-size:26px;font-weight:700;letter-spacing:-.02em", text: "Barq" }));
   brand.appendChild(el("span", { class: "v", text: "CI" }));
   card.appendChild(brand);
 
@@ -1535,7 +1488,18 @@ function openLogs(id) {
     if (!target) { return; }
     try {
       var chunk = JSON.parse(event.data);
-      target.textContent += chunk;
+      // Syntax highlight: color error lines
+      var lines = chunk.split("\n");
+      var html = "";
+      lines.forEach(function(line) {
+        var cls = "";
+        if (/error|fail|panic|fatal/i.test(line)) cls = " class=\"err\"";
+        else if (/warn/i.test(line)) cls = " class=\"warn\"";
+        else if (/success|pass|ok|done/i.test(line)) cls = " class=\"ok\"";
+        else if (/info/i.test(line)) cls = " class=\"info\"";
+        html += "<div class=\"line\" + " + (cls ? cls : "") + ">" + esc(line) + "</div>";
+      });
+      target.innerHTML = html;
       target.scrollTop = target.scrollHeight;
     } catch (e) { /* ignore malformed frames */ }
   });
@@ -1597,8 +1561,6 @@ function tick() {
   if (!S.user) { return; }
   loadRuns().then(function () {
     if (S.tab === "stats") { loadStats(); }
-    if (S.tab === "system") { loadHealth(); }
-    if (S.tab === "settings") { loadUsers(); loadSecrets(); loadAlerts(); loadPlugins(); }
     render();
   }).catch(function () { /* keep the last rendered state */ });
 }
@@ -1617,4 +1579,3 @@ loadSession().then(function () {
 </script>
 </body>
 </html>
-`
