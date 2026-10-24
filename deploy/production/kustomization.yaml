@@ -1,0 +1,67 @@
+# The production overlay.
+#
+#   kubectl apply -k deploy/production
+#
+# It changes three things:
+#
+#   1. The object store becomes S3, so run state, archives, cache
+#      records and workspaces are durable and shared by the replicas.
+#   2. The controller scales to two replicas. The lease guarantees a
+#      single active scheduler and the shared object store guarantees
+#      a single source of truth.
+#   3. The hot tier becomes a per-replica encrypted EBS volume, using
+#      a generic ephemeral volume so that no two replicas ever try to
+#      mount the same ReadWriteOnce volume.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: barq
+
+resources:
+  - ../k8s-manifests.yaml
+
+configMapGenerator:
+  - name: barq-config
+    behavior: merge
+    literals:
+      - BARQ_MODE=production
+      - BARQ_OBJECT_BACKEND=s3
+      - BARQ_SECURE_COOKIES=true
+      - BARQ_ALLOW_SIGNUP=false
+      - BARQ_AUTH_REQUIRED=true
+
+replicas:
+  - name: barq-controller
+    count: 2
+
+patches:
+  - target:
+      kind: Deployment
+      name: barq-controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0
+        value:
+          name: hot
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                storageClassName: gp3
+                resources:
+                  requests:
+                    storage: 10Gi
+
+  - target:
+      kind: Deployment
+      name: barq-controller
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: BARQ_S3_PATH_STYLE
+          value: "false"
+
+images:
+  - name: barq
+    newTag: latest

@@ -1,0 +1,30 @@
+name: barq-e2e-verification
+git_commit: 9f8e7d6c
+secrets:
+  - PROD_DEPLOY_KEY_999
+steps:
+  - id: lint
+    image: golang:1.22-alpine
+    commands:
+      - echo "Authenticating with PROD_DEPLOY_KEY_999"
+      - go version
+  - id: unit-test
+    image: golang:1.22-alpine
+    depends_on: [lint]
+    parallelism: 2
+    matrix:
+      GO_VERSION: [1.22, 1.23]
+      ARCH: [amd64, arm64]
+    commands:
+      - echo "Running shard $BARQ_NODE_INDEX of$BARQ_NODE_TOTAL for Go $GO_VERSION/$ARCH"
+  - id: build-binary
+    image: golang:1.22-alpine
+    depends_on: [unit-test]
+    commands:
+      - echo "SIMULATE_SPOT_PREEMPT"
+      - echo "Compiled static Barq release binary"
+  - id: notify
+    plugin: plugins/slack:latest
+    depends_on: [build-binary]
+    with:
+      channel: "#ci-builds"

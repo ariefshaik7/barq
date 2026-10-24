@@ -1,0 +1,143 @@
+#!/bin/sh
+# barq-builtin dispatches the built-in Barq plugins.
+#
+# Every plugin receives its configuration in PLUGIN_* environment
+# variables and may export values to downstream steps by appending
+# KEY=VALUE lines to the output file. The output file is parsed as data
+# by the worker wrapper, never sourced, so shell metacharacters in a
+# value are inert.
+
+set -u
+
+OUTPUT_FILE="${BARQ_OUTPUT_FILE:-/workspace/.barq.env}"
+PLUGIN_NAME="${1:-}"
+shift 2>/dev/null || true
+
+log() {
+  printf '[barq-builtin:%s] %s\n' "${PLUGIN_NAME}" "$*"
+}
+
+# emit writes a value to the output file. Values containing newlines
+# are rejected because the output format is line oriented.
+emit() {
+  key="$1"
+  value="$2"
+  case "$value" in
+    *'
+'*)
+      log "refusing to export a multi-line value for ${key}"
+      return 1
+      ;;
+  esac
+  printf '%s=%s\n' "$key" "$value" >> "$OUTPUT_FILE"
+}
+
+require() {
+  name="$1"
+  value="${2:-}"
+  if [ -z "$value" ]; then
+    log "missing required input: ${name}"
+    exit 2
+  fi
+}
+
+case "$PLUGIN_NAME" in
+  webhook|slack)
+    url="${PLUGIN_WEBHOOK_URL:-}"
+    require "PLUGIN_WEBHOOK_URL" "$url"
+
+    if [ "$PLUGIN_NAME" = "slack" ]; then
+      channel="${PLUGIN_CHANNEL:-#ci-builds}"
+      message="${PLUGIN_MESSAGE:-Barq step ${BARQ_STEP_ID:-unknown} completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+      payload=$(jq -nc --arg channel "$channel" --arg text "$message" '{channel:$channel,text:$text}')
+    else
+      message="${PLUGIN_MESSAGE:-Barq step ${BARQ_STEP_ID:-unknown} completed}"
+      payload=$(jq -nc --arg text "$message" '{text:$text}')
+    fi
+
+    log "delivering notification"
+    if ! curl -fsS --retry 3 --retry-delay 1 -X POST \
+         -H 'Content-Type: application/json' \
+         -d "$payload" "$url"; then
+      log "notification delivery failed"
+      exit 1
+    fi
+
+    if [ "$PLUGIN_NAME" = "slack" ]; then
+      emit "LAST_NOTIFIED_CHANNEL" "${PLUGIN_CHANNEL:-#ci-builds}"
+    fi
+    emit "LAST_NOTIFIED_AT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ;;
+
+  git-clone)
+    repository="${PLUGIN_REPOSITORY:-}"
+    require "PLUGIN_REPOSITORY" "$repository"
+    revision="${PLUGIN_REF:-HEAD}"
+    depth="${PLUGIN_DEPTH:-1}"
+
+    target="${PLUGIN_TARGET:-repo}"
+    log "cloning ${repository} at ${revision}"
+    rm -rf "${target}"
+    mkdir -p "${target}"
+
+    args="clone --depth ${depth}"
+    if [ -n "${PLUGIN_TOKEN:-}" ]; then
+      # The token is supplied through GIT_ASKPASS so that it never
+      # appears in the process arguments or in the clone URL.
+      cat > /tmp/barq-askpass.sh <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) echo "x-access-token" ;;
+  *Password*) echo "$BARQ_GIT_TOKEN" ;;
+  *) echo "" ;;
+esac
+ASKPASS
+      chmod 0700 /tmp/barq-askpass.sh
+      export GIT_ASKPASS=/tmp/barq-askpass.sh
+      export BARQ_GIT_TOKEN="${PLUGIN_TOKEN}"
+      export GIT_TERMINAL_PROMPT=0
+      args="${args} --branch ${revision}"
+    fi
+
+    # shellcheck disable=SC2086
+    if ! git $args "$repository" "$target"; then
+      log "clone failed"
+      exit 1
+    fi
+    if [ -n "${PLUGIN_TOKEN:-}" ]; then
+      cd "$target" || exit 1
+      git fetch --depth "$depth" origin "$revision" || true
+      git checkout "$revision" || true
+      cd - >/dev/null || true
+    fi
+    emit "GIT_REPOSITORY" "$repository"
+    emit "GIT_REVISION" "$revision"
+    ;;
+
+  artifact)
+    name="${PLUGIN_NAME:-artifact}"
+    archive="${PLUGIN_ARCHIVE:-${name}.tar.gz}"
+    log "packaging workspace into ${archive}"
+    if ! tar -czf "$archive" -C /workspace .; then
+      log "packaging failed"
+      exit 1
+    fi
+    emit "ARTIFACT_PATH" "/workspace/${archive}"
+    emit "ARTIFACT_NAME" "$name"
+    ;;
+
+  audit)
+    log "recording audit event for step ${BARQ_STEP_ID:-unknown}"
+    entry="${BARQ_STEP_ID:-unknown} $(date -u +%Y-%m-%dT%H:%M:%SZ) ${BARQ_RUN_ID:-unknown}"
+    printf '%s\n' "$entry" >> "${PLUGIN_AUDIT_FILE:-/workspace/.barq-audit.log}"
+    emit "AUDIT_RECORDED_AT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ;;
+
+  *)
+    log "unknown built-in plugin: ${PLUGIN_NAME}"
+    exit 2
+    ;;
+esac
+
+log "completed"
+exit 0

@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "barq/internal/agent/proto";
+
+// BarqAgent is the service that agents call to interact with the controller.
+service BarqAgent {
+  // Register registers the agent with the controller.
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
+
+  // Next returns the next workflow for the agent to execute.
+  rpc Next(NextRequest) returns (NextResponse) {}
+
+  // Init signals that the workflow has been initialized.
+  rpc Init(InitRequest) returns (Empty) {}
+
+  // Wait blocks until the workflow is canceled by the controller.
+  rpc Wait(WaitRequest) returns (WaitResponse) {}
+
+  // Done signals that the workflow has finished.
+  rpc Done(DoneRequest) returns (Empty) {}
+
+  // Extend extends the workflow deadline.
+  rpc Extend(ExtendRequest) returns (Empty) {}
+
+  // Update updates the state of a step.
+  rpc Update(UpdateRequest) returns (Empty) {}
+
+  // Log sends log entries from the agent.
+  rpc Log(LogRequest) returns (Empty) {}
+
+  // Health reports the agent's health.
+  rpc Health(HealthRequest) returns (Empty) {}
+}
+
+// BarqController is the service that the controller uses to manage agents.
+// This is a separate service so that agents don't need to expose a gRPC server.
+service BarqController {
+  // ListAgents returns all registered agents.
+  rpc ListAgents(Empty) returns (ListAgentsResponse) {}
+
+  // GetAgent returns an agent by ID.
+  rpc GetAgent(GetAgentRequest) returns (AgentInfo) {}
+
+  // CancelWorkflow cancels a running workflow.
+  rpc CancelWorkflow(CancelWorkflowRequest) returns (Empty) {}
+}
+
+//
+// Basic Types
+//
+
+message StepState {
+  string step_id = 1;
+  int64 started = 2;
+  int64 finished = 3;
+  bool exited = 4;
+  int32 exit_code = 5;
+  string error = 6;
+  bool canceled = 7;
+  bool skipped = 8;
+}
+
+message WorkflowState {
+  int64 started = 1;
+  int64 finished = 2;
+  string error = 3;
+  bool canceled = 4;
+}
+
+message LogEntry {
+  string step_id = 1;
+  int64 time = 2;
+  int32 line = 3;
+  int32 type = 4; // 0 = stdout, 1 = stderr, 2 = exit-code, 3 = metadata, 4 = progress
+  bytes data = 5;
+}
+
+message Filter {
+  map<string, string> labels = 1;
+}
+
+message Workflow {
+  string id = 1;
+  int64 timeout = 2;
+  bytes payload = 3; // Serialized pipeline spec
+}
+
+message AgentInfo {
+  string id = 1;
+  string hostname = 2;
+  string platform = 3;
+  int32 capacity = 4;
+  string backend = 5;
+  string version = 6;
+  map<string, string> labels = 7;
+  int64 registered_at = 8;
+  int64 last_health_at = 9;
+  string status = 10; // "online", "offline", "busy"
+}
+
+//
+// Request types
+//
+
+message RegisterRequest {
+  AgentInfo info = 1;
+}
+
+message RegisterResponse {
+  string agent_id = 1;
+  string token = 2; // JWT token for subsequent calls
+}
+
+message NextRequest {
+  Filter filter = 1;
+}
+
+message NextResponse {
+  Workflow workflow = 1;
+}
+
+message InitRequest {
+  string workflow_id = 1;
+  WorkflowState state = 2;
+}
+
+message WaitRequest {
+  string workflow_id = 1;
+}
+
+message WaitResponse {
+  bool canceled = 1;
+}
+
+message DoneRequest {
+  string workflow_id = 1;
+  WorkflowState state = 2;
+}
+
+message ExtendRequest {
+  string workflow_id = 1;
+}
+
+message UpdateRequest {
+  string workflow_id = 1;
+  StepState state = 2;
+}
+
+message LogRequest {
+  repeated LogEntry log_entries = 1;
+}
+
+message HealthRequest {
+  string agent_id = 1;
+  string status = 2; // "online", "busy", "offline"
+  int32 running_workflows = 3;
+}
+
+message Empty {}
+
+message ListAgentsResponse {
+  repeated AgentInfo agents = 1;
+}
+
+message GetAgentRequest {
+  string agent_id = 1;
+}
+
+message CancelWorkflowRequest {
+  string workflow_id = 1;
+}

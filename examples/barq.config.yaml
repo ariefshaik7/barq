@@ -1,0 +1,79 @@
+# Barq configuration as code.
+#
+# Apply it with:
+#
+#   barqctl apply examples/barq.config.yaml
+#
+# The document is declarative. Applying it is idempotent: users that
+# are declared are created or updated, secrets that are declared are
+# reconciled by name, and pipelines are validated.
+#
+# Values are never stored in this document. A secret names the
+# environment variable that holds it, so the document stays free of
+# credentials and the credentials stay out of disk.
+version: 1
+kind: BarqConfig
+
+meta:
+  name: platform
+  environment: production
+  owner: platform-team
+  labels:
+    tier: infrastructure
+
+server:
+  mode: production
+  object_backend: s3
+  replicas: 3
+  namespace: barq
+  lease_name: barq-leader
+  object_prefix: barq
+  public_url: "https://ci.example.com"
+  plugin_runtime_image: "barq/plugin-runtime:1.0.0"
+  max_attempts: 3
+  poll_interval: "2s"
+  lease_duration: "10s"
+  session_ttl: "12h"
+  allowed_branches:
+    - main
+    - "release/*"
+
+auth:
+  # Local account creation is disabled. The first administrator is
+  # created out of band, and everybody else signs in with the identity
+  # provider.
+  signup_enabled: false
+  oidc:
+    issuer: "https://accounts.example.com"
+    client_id: "barq"
+    redirect_url: "https://ci.example.com/api/v1/auth/oidc/callback"
+    allowed_domains:
+      - example.com
+
+users:
+  - email: "admin@example.com"
+    display_name: "Platform Administrator"
+    role: admin
+    password_ref: "BARQ_ADMIN_PASSWORD"
+
+  - email: "release@example.com"
+    display_name: "Release Manager"
+    role: builder
+    password_ref: "BARQ_RELEASE_PASSWORD"
+
+  - email: "viewer@example.com"
+    display_name: "Read Only"
+    role: viewer
+
+secrets:
+  - name: NPM_TOKEN
+    from_env: "NPM_TOKEN"
+    note: "Injected into any step that lists it under secrets."
+
+  - name: DOCKER_PASSWORD
+    from_env: "DOCKER_PASSWORD"
+
+pipelines:
+  - name: release
+    path: ../.barq.yaml
+    active: true

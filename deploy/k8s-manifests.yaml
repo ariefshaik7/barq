@@ -1,0 +1,383 @@
+# Barq CI deployment manifests.
+#
+# These manifests are portable across kind, minikube and cloud
+# Kubernetes. The controller uses an emptyDir hot tier so that it
+# schedules immediately everywhere.
+#
+# The LOCAL profile runs one replica against the leader-local object
+# store. That store is not durable, so the local profile is for
+# development. For production, apply the kustomize overlay in
+# deploy/production, which switches to S3, scales the controller and
+# gives every replica its own encrypted EBS volume.
+#
+#   kubectl apply -f deploy/k8s-manifests.yaml
+#
+# The credentials are never committed. Create the secret first:
+#
+#   kubectl -n barq create secret generic barq-credentials \
+#     --from-literal=master-key="$(openssl rand -hex 32 | xxd -r -p | base64)" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: barq
+  labels:
+    app.kubernetes.io/name: barq
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: barq-controller
+  namespace: barq
+  labels:
+    app.kubernetes.io/name: barq
+# The controller needs its own token to manage workers and the lease.
+# Worker Pods never mount a token.
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: barq-controller
+  namespace: barq
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: barq-controller
+  namespace: barq
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: barq-controller
+subjects:
+  - kind: ServiceAccount
+    name: barq-controller
+    namespace: barq
+---
+# The credentials are supplied separately. The keys are declared here
+# so that the deployment shape is explicit; the values are never
+# committed to a repository.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: barq-credentials
+  namespace: barq
+  labels:
+    app.kubernetes.io/name: barq
+type: Opaque
+stringData:
+  endpoint: ""
+  bucket: ""
+  region: "us-east-1"
+  access-key-id: ""
+  secret-access-key: ""
+  api-token: ""
+  master-key: ""
+  relay-secret: ""
+  github-webhook-secret: ""
+  github-token: ""
+  gitlab-webhook-token: ""
+  gitlab-token: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: barq-config
+  namespace: barq
+  labels:
+    app.kubernetes.io/name: barq
+data:
+  BARQ_MODE: "local"
+  BARQ_OBJECT_BACKEND: "local"
+  BARQ_LEASE_NAME: "barq-leader"
+  BARQ_NAMESPACE: "barq"
+  BARQ_HOT_ROOT: "/var/lib/barq/ebs"
+  BARQ_LOCAL_OBJECT_ROOT: "/var/lib/barq/ebs/objects"
+  BARQ_OBJECT_PREFIX: "barq"
+  BARQ_PLUGIN_RUNTIME_IMAGE: "barq/plugin-runtime:1.0.0"
+  BARQ_POLL_INTERVAL: "2s"
+  BARQ_LEASE_DURATION: "10s"
+  BARQ_LEASE_RENEW_TIME: "3s"
+  BARQ_MAX_ATTEMPTS: "3"
+  BARQ_SESSION_TTL: "12h"
+  BARQ_ALLOW_SIGNUP: "true"
+  BARQ_AUTH_REQUIRED: "true"
+  BARQ_SECURE_COOKIES: "false"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: barq-controller
+  namespace: barq
+  labels:
+    app.kubernetes.io/name: barq
+    app.kubernetes.io/component: controller
+spec:
+  # The local object store is leader local, so the local profile runs a
+  # single replica. The production overlay scales this to 2 or more
+  # and switches the object store to S3.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: barq
+      app.kubernetes.io/component: controller
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: barq
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: barq-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: barq
+              app.kubernetes.io/component: controller
+      containers:
+        - name: controller
+          image: barq:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BARQ_IDENTITY
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: BARQ_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: BARQ_LEADER_URL
+              value: "http://$(BARQ_POD_IP):8080"
+            - name: BARQ_PUBLIC_URL
+              value: "http://barq.barq.svc.cluster.local:8080"
+            - name: BARQ_RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: relay-secret
+                  optional: true
+            - name: BARQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: api-token
+                  optional: true
+            - name: BARQ_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: master-key
+                  optional: true
+            - name: BARQ_S3_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: endpoint
+                  optional: true
+            - name: BARQ_S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: bucket
+                  optional: true
+            - name: BARQ_S3_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: region
+                  optional: true
+            - name: BARQ_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: access-key-id
+                  optional: true
+            - name: BARQ_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: secret-access-key
+                  optional: true
+            - name: BARQ_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: github-webhook-secret
+                  optional: true
+            - name: BARQ_GITHUB_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: github-token
+                  optional: true
+            - name: BARQ_GITLAB_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: gitlab-webhook-token
+                  optional: true
+            - name: BARQ_GITLAB_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: barq-credentials
+                  key: gitlab-token
+                  optional: true
+          envFrom:
+            - configMapRef:
+                name: barq-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: hot
+              mountPath: /var/lib/barq/ebs
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: hot
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: barq
+  namespace: barq
+  labels:
+    app.kubernetes.io/name: barq
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: barq
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: barq-controller
+  namespace: barq
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: barq
+      app.kubernetes.io/component: controller
+---
+# The controller needs to reach the Kubernetes API server, the object
+# store and the package registries that the workers pull from. It
+# does not need anything else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: barq-controller
+  namespace: barq
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: barq
+      app.kubernetes.io/component: controller
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: barq
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # The Kubernetes API server.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+      ports:
+        - protocol: TCP
+          port: 443
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The object store and the internet.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

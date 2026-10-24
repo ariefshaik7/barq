@@ -1,0 +1,42 @@
+# Barq CI - Docker Compose test environment
+#
+# Spins up only the Barq controller using the local object backend.
+# No external S3/MinIO dependency — everything runs on named volumes.
+#
+# Usage:
+#
+#   docker compose up -d
+#   curl -sS -X POST http://localhost:8080/api/v1/runs \
+#     -H 'Content-Type: application/yaml' --data-binary @pipeline.yaml
+#
+# To test with S3 instead, override the environment variables:
+#
+#   BARQ_OBJECT_BACKEND=s3 \
+#   BARQ_S3_ENDPOINT=http://your-s3:9000 \
+#   BARQ_S3_BUCKET=barq \
+#   BARQ_S3_ACCESS_KEY_ID=... \
+#   BARQ_S3_SECRET_ACCESS_KEY=...
+#
+services:
+  barq-controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"   # HTTP API + embedded UI
+      - "9080:9080"   # gRPC agent server
+    environment:
+      BARQ_MODE: simulator
+      BARQ_OBJECT_BACKEND: local
+      BARQ_HOT_ROOT: /tmp/barq-hot
+      BARQ_LOCAL_OBJECT_ROOT: /tmp/barq-objects
+      BARQ_PUBLIC_URL: http://localhost:8080
+      BARQ_PORT: "8080"
+      BARQ_API_TOKEN: dev-token-12345
+      BARQ_ALLOW_SIGNUP: "true"
+      BARQ_LOG_LEVEL: info
+    volumes:
+      - barq_hot:/var/lib/barq/ebs
+
+volumes:
+  barq_hot:
